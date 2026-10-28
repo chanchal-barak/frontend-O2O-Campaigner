@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { Link, Navigate, NavLink, Route, Routes, useNavigate } from 'react-router-dom';
-import { api, formatMoneyPaise, formatMoneyRupees, getBrowserLocation } from './api';
+import { API_BASE, api, formatMoneyPaise, formatMoneyRupees, getBrowserLocation } from './api';
 
 const AuthContext = createContext(null);
 const useAuth = () => useContext(AuthContext);
@@ -554,34 +554,62 @@ function CustomerOffers() {
         }).catch(() => {});
     }, []);
     async function searchOffers(coords = location) {
-        if (coords?.latitude == null || coords?.longitude == null) throw new Error('Please use your location or enter latitude and longitude.');
-        const params = { latitude: Number(coords.latitude), longitude: Number(coords.longitude), radius_km: Number(radius), limit: 100, offset: 0 };
+        const latitude = Number(coords?.latitude);
+        const longitude = Number(coords?.longitude);
+        if (coords?.latitude == null || coords?.longitude == null || !Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+            throw new Error('Enter a valid latitude (-90 to 90) and longitude (-180 to 180), or press “Use my location”.');
+        }
+        const params = { latitude, longitude, radius_km: Number(radius), limit: 100, offset: 0 };
         if (category) params.category_id = category;
-        // The registered backend route is /customer/offers (not /customer/offers/nearby).
-        const result = await api.get('/customer/offers', { params });
+        let result;
+        try {
+            result = await api.get('/customer/offers', { params });
+        } catch (err) {
+            if (err.status === 404) {
+                throw new Error(`The API returned 404 for ${API_BASE}/customer/offers. The frontend is calling the documented route; confirm the deployed API has this route and that VITE_API_BASE_URL points to the same backend you tested.`);
+            }
+            if (err.status === 401) throw new Error('Your login session is missing or expired. Sign out and sign in again as a customer.');
+            if (err.status === 403) throw new Error('This account does not have customer access. Sign in with a customer account.');
+            throw err;
+        }
         const rows = Array.isArray(result) ? result : result?.offers || [];
         const withDistances = rows.map(offer => {
-            const rawLat = offer.store?.lat ?? offer.store?.latitude, rawLng = offer.store?.lng ?? offer.store?.longitude;
+            const rawLat = offer.store?.lat ?? offer.store?.latitude;
+            const rawLng = offer.store?.lng ?? offer.store?.longitude;
             const lat = Number(rawLat), lng = Number(rawLng);
             const hasCoords = rawLat != null && rawLng != null && Number.isFinite(lat) && Number.isFinite(lng);
             const backendDistance = Number(offer.store?.distance_km);
-            const distance = hasCoords ? distanceKm(Number(coords.latitude), Number(coords.longitude), lat, lng) : (Number.isFinite(backendDistance) ? backendDistance : null);
+            const distance = hasCoords ? distanceKm(latitude, longitude, lat, lng) : (Number.isFinite(backendDistance) ? backendDistance : null);
             return { ...offer, store: { ...offer.store, distance_km: distance == null ? offer.store?.distance_km : distance } };
         });
-        const nearby = withDistances.filter(o => { const d = Number(o.store?.distance_km); return !Number.isFinite(d) || d <= Number(radius) + 0.01; });
-        nearby.sort((a, b) => { const da = Number(a.store?.distance_km), db = Number(b.store?.distance_km); if (!Number.isFinite(da)) return 1; if (!Number.isFinite(db)) return -1; return da - db; });
+        // The API already filters by radius; this client-side check is a safety net only when distance is known.
+        const nearby = withDistances.filter(o => {
+            const raw = o.store?.distance_km;
+            if (raw == null || raw === '') return true;
+            const d = Number(raw);
+            return !Number.isFinite(d) || d <= Number(radius) + 0.02;
+        });
+        nearby.sort((a, b) => {
+            const da = Number(a.store?.distance_km), db = Number(b.store?.distance_km);
+            if (!Number.isFinite(da)) return 1;
+            if (!Number.isFinite(db)) return -1;
+            return da - db;
+        });
         setOffers(nearby);
-        setNotice(nearby.length ? `Showing ${nearby.length} active offer${nearby.length === 1 ? '' : 's'}, nearest first.` : `No active offers found within ${radius} km. Try another radius or category.`);
+        setNotice(nearby.length ? `Showing ${nearby.length} active offer${nearby.length === 1 ? '' : 's'}, nearest first.` : `No active offers found within ${radius} km for ${latitude.toFixed(5)}, ${longitude.toFixed(5)}. Try 10 km or remove the category filter.`);
     }
     async function useLocation() {
         setLocationBusy(true); setLoading(true); setError(''); setNotice('');
         try {
             const p = await getBrowserLocation();
             const coords = { latitude: Number(p.latitude ?? p.lat), longitude: Number(p.longitude ?? p.lng) };
-            setLocation(coords); setLocationLabel('Using your current browser location');
+            if (!Number.isFinite(coords.latitude) || !Number.isFinite(coords.longitude)) throw new Error('The browser did not return valid coordinates. Try entering them manually.');
+            setLocation(coords);
+            setLocationLabel(`Current location: ${coords.latitude.toFixed(6)}, ${coords.longitude.toFixed(6)}`);
             await searchOffers(coords);
-        } catch (e) { setError(e.message); }
-        finally { setLocationBusy(false); setLoading(false); }
+        } catch (e) {
+            setError(e.message || 'Could not get your location. You can enter latitude and longitude manually.');
+        } finally { setLocationBusy(false); setLoading(false); }
     }
     async function search(e) {
         e?.preventDefault(); setLoading(true); setError(''); setNotice('');
@@ -617,7 +645,7 @@ function OfferCard({ offer, onClaim, claimedVoucher }) {
         <div className="offer-value">{pct ? `${offer.value}% OFF` : `${formatMoneyRupees(offer.value)} OFF`}</div><h3>{offer.title}</h3><p className="offer-description">{offer.description || 'A local offer from your neighbourhood store.'}</p>
         <div className="offer-store"><div className="store-avatar">▦</div><div><b>{offer.store?.name || 'Local store'}</b><span>{offer.store?.address || 'Address unavailable'}</span></div></div>
         <div className="offer-meta"><span>Min. order {offer.min_order_paise ? formatMoneyPaise(offer.min_order_paise) : '—'}</span>{offer.max_discount_paise && <span>Max save {formatMoneyPaise(offer.max_discount_paise)}</span>}</div>
-        {claimedVoucher?.code ? <div className="alert success" role="status"><b>Your voucher code</b><br /><span className="code-text">{claimedVoucher.code}</span><br /><small>Show this code to the merchant when the bill is created.</small>{claimedVoucher.expires_at && <small> Expires: {new Date(claimedVoucher.expires_at).toLocaleString('en-IN')}</small>}</div> : <button className="btn btn-primary btn-full" disabled={busy} onClick={async () => { setBusy(true); try { await onClaim(); } catch (_) { /* Page displays the error. */ } finally { setBusy(false); } }}>{busy ? 'Claiming…' : 'Claim voucher →'}</button>}
+        {claimedVoucher?.code ? (() => { const expired = claimedVoucher.expires_at && new Date(claimedVoucher.expires_at).getTime() <= Date.now(); const status = String(claimedVoucher.status || '').toLowerCase(); const used = ['redeemed', 'used'].includes(status); const cancelled = status === 'cancelled'; return <div className={`alert ${expired || used || cancelled || status === 'expired' ? 'error' : 'success'}`} role="status"><b>{used ? 'Voucher already redeemed' : cancelled ? 'Voucher cancelled' : (expired || status === 'expired') ? 'Voucher expired' : 'Your voucher code'}</b>{!(expired || used || cancelled || status === 'expired') && <><br /><span className="code-text">{claimedVoucher.code}</span><br /><small>Show this code to the merchant when the bill is created.</small></>}{claimedVoucher.expires_at && <><br /><small>Expires: {new Date(claimedVoucher.expires_at).toLocaleString('en-IN')}</small></>}</div>; })() : <button className="btn btn-primary btn-full" disabled={busy} onClick={async () => { setBusy(true); try { await onClaim(); } catch (_) { /* Page displays the error. */ } finally { setBusy(false); } }}>{busy ? 'Claiming…' : 'Claim voucher →'}</button>}
         {offer.store?.google_maps_link && <a className="map-link" href={offer.store.google_maps_link} target="_blank" rel="noreferrer">View shop location ↗</a>}</article>;
 }
 function EmptyState({ icon = '▦', title, text, action }) {
@@ -1144,7 +1172,8 @@ function MerchantOffers() {
                 store_id: f.store_id,
                 title: f.title,
                 description: f.description || null,
-                type: f.type,
+                type: f.type === 'percentage' ? 'percent' : 'fixed',
+
                 value: Number(f.value),
                 min_order_paise: Math.round(Number(f.min_order_rupees || 0) * 100),
                 max_discount_paise: f.max_discount_rupees === ''

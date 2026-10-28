@@ -1,3 +1,4 @@
+
 import axios from 'axios';
 
 export const API_BASE = (
@@ -15,34 +16,52 @@ const client = axios.create({
   timeout: 30000,
 });
 
+// Attach the logged-in user's token to protected API requests.
 client.interceptors.request.use((config) => {
   const token = sessionStorage.getItem(TOKEN_KEY);
 
   if (token) {
+    config.headers = config.headers || {};
     config.headers.Authorization = `Bearer ${token}`;
   }
 
   return config;
 });
 
+// Convert API errors into readable messages.
 client.interceptors.response.use(
   (response) => response,
   (error) => {
     const status = error?.response?.status;
     const detail = error?.response?.data?.detail;
 
-    const message =
-      typeof detail === 'string'
-        ? detail
-        : Array.isArray(detail)
-          ? detail
-              .map((item) => item.msg || JSON.stringify(item))
-              .join(', ')
-          : detail
-            ? JSON.stringify(detail)
-            : error?.code === 'ECONNABORTED'
-              ? 'The API request timed out. Please try again.'
-              : error?.message || 'Network request failed.';
+    let message;
+
+    if (typeof detail === 'string') {
+      message = detail;
+    } else if (Array.isArray(detail)) {
+      message = detail
+        .map((item) => item.msg || JSON.stringify(item))
+        .join(', ');
+    } else if (detail) {
+      message = JSON.stringify(detail);
+    } else if (status === 401) {
+      message = 'Your session has expired or you are not logged in. Please sign in again.';
+    } else if (status === 403) {
+      message = 'You do not have permission to perform this action.';
+    } else if (status === 404) {
+      message = 'The requested API route or record was not found. Check the request URL.';
+    } else if (status === 409) {
+      message = 'This action conflicts with the current offer or voucher status.';
+    } else if (status === 422) {
+      message = 'Some request fields are invalid. Please check your inputs.';
+    } else if (error?.code === 'ECONNABORTED') {
+      message = 'The API request timed out. Please try again.';
+    } else if (!error?.response) {
+      message = 'Could not connect to the API. Check your internet connection and server.';
+    } else {
+      message = error?.message || 'Network request failed.';
+    }
 
     const normalized = new Error(message);
     normalized.status = status;
@@ -53,6 +72,7 @@ client.interceptors.response.use(
   },
 );
 
+// Return response data directly to the React components.
 async function unwrap(promise) {
   const response = await promise;
   return response.status === 204 ? null : response.data;
@@ -60,11 +80,16 @@ async function unwrap(promise) {
 
 export const api = {
   get: (path, config) => unwrap(client.get(path, config)),
-  post: (path, body, config) => unwrap(client.post(path, body, config)),
-  put: (path, body, config) => unwrap(client.put(path, body, config)),
-  patch: (path, body, config) => unwrap(client.patch(path, body, config)),
-  delete: (path, config) => unwrap(client.delete(path, config)),
+  post: (path, body, config) =>
+    unwrap(client.post(path, body, config)),
+  put: (path, body, config) =>
+    unwrap(client.put(path, body, config)),
+  patch: (path, body, config) =>
+    unwrap(client.patch(path, body, config)),
+  delete: (path, config) =>
+    unwrap(client.delete(path, config)),
 };
+
 export const adminLogin = (email, password) =>
   api.post('/auth/login', { email, password });
 
@@ -78,7 +103,9 @@ export const getAdminMerchants = (params = {}) =>
   api.get('/admin/merchants', { params });
 
 export const deactivateAdminMerchant = (merchantId) =>
-  api.delete(`/admin/merchants/${encodeURIComponent(merchantId)}`);
+  api.delete(
+    `/admin/merchants/${encodeURIComponent(merchantId)}`,
+  );
 
 export const restoreAdminMerchant = (merchantId) =>
   api.post(
@@ -130,34 +157,51 @@ export const getStoreCategories = () =>
 
 export const getBrowserLocation = () =>
   new Promise((resolve, reject) => {
-    if (!navigator.geolocation) {
+    if (!('geolocation' in navigator)) {
       reject(
-        new Error('Geolocation is not supported by this browser.'),
+        new Error(
+          'Geolocation is not supported by this browser. Enter coordinates manually.',
+        ),
       );
       return;
     }
 
     navigator.geolocation.getCurrentPosition(
-      ({ coords }) =>
+      ({ coords }) => {
         resolve({
           latitude: coords.latitude,
           longitude: coords.longitude,
           lat: coords.latitude,
           lng: coords.longitude,
           accuracy: coords.accuracy,
-        }),
-      (error) =>
-        reject(
-          new Error(
-            error.code === error.PERMISSION_DENIED
-              ? 'Location permission was denied. Allow location access in your browser settings.'
-              : error.message || 'Could not determine your location.',
-          ),
-        ),
+        });
+      },
+      (error) => {
+        let message;
+
+        switch (error.code) {
+          case 1:
+            message =
+              'Location permission was denied. Allow location access for this site in your browser settings, then try again.';
+            break;
+          case 2:
+            message =
+              'Your current location could not be determined. Check device location services or enter coordinates manually.';
+            break;
+          case 3:
+            message =
+              'Location lookup timed out. Try again or enter coordinates manually.';
+            break;
+          default:
+            message = error.message || 'Could not determine your location.';
+        }
+
+        reject(new Error(message));
+      },
       {
         enableHighAccuracy: true,
-        timeout: 12000,
-        maximumAge: 60000,
+        timeout: 20000,
+        maximumAge: 0,
       },
     );
   });
